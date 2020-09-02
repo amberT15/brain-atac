@@ -5,10 +5,13 @@ import pandas as pd
 import h5py,os
 import model_structure
 import matplotlib as plt
+import sklearn.metrics
 from sklearn.metrics import roc_curve
 from progressbar import ProgressBar
 from sklearn.metrics import auc
+from sklearn.metrics import roc_curve
 import matplotlib.pyplot as plt
+
 
 
 def conv_layer(inputs,filter_num,filter_size,dilation,stride = 1,padding = 'same',initilizer = 'glorot_normal',activation = 'relu'):
@@ -35,22 +38,19 @@ def residual_block(inputs,filter_num,filter_size,dilation,activation = 'relu'):
     residual_sum = tf.keras.layers.add([inputs,rb_conv2])
     return residual_sum
     
-def filter_dataset(sequence,target,limit):
+def filter_dataset(target,limit):
     #only include reads with at least one peak
     #limit = filter threshold
-    
+    binary_target = np.zeros(len(target))
     pbar = ProgressBar()
     del_list = []
     for i in pbar(range(0,len(target))):
-        if any(y > limit for y in target[i]):
+        if target[i] > limit:
             next
         else:
-            del_list.append(i)
-    print(len(del_list))
-    filtered_seq = np.delete(sequence,del_list,0)
-    filtered_target= np.delete(target,del_list,0)
-   
-    return filtered_seq,filtered_target
+            binary_target[i] = 1
+    
+    return binary_target
 
 def early_stopping(patience = 20, verbose = 1):
     earlystop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', 
@@ -80,9 +80,39 @@ def reduce_lr(patience = 3):
                                                  verbose=1)
     return reduce_lr
 
+def curve_figure(y_pred,y_test,exp_count):
+    
+    #for each experiment
+    pred = y_pred
+    test = y_test
+    total = len(pred)
+    
+    #plot roc curve
+    fpr,tpr,roc_thr = sklearn.metrics.roc_curve(test,pred)
+    auroc = sklearn.metrics.auc(fpr,tpr)
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.plot(fpr, tpr, label='Keras (area = {:.3f})'.format(auroc))
+    plt.xlabel('False positive rate')
+    plt.ylabel('True positive rate')
+    plt.title('ROC curve')
+    plt.legend(loc='best')
+    plt.show();
+    plt.close()
+    
+    #plot pr curve
+    precision, recall, pr_thr = sklearn.metrics.precision_recall_curve(test, pred)
+    aupr = sklearn.metrics.auc(recall,precision)
+    plt.plot(recall, precision, label='Keras (area = {:.3f})'.format(aupr))
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.legend(loc='best')
+    plt.show();
+    plt.close()
+        
+
 def CNN_dense(input_size,label_num,padding = 'same',activation = 'relu'):
     
-    inputs = tf.keras.layers.Input(input_shape = input_size)
+    inputs = tf.keras.layers.Input(shape = input_size)
     
     conv_1 = conv_layer(inputs,32,5,1,activation = activation)
     conv_2 = conv_layer(conv_1,32,5,1,activation = activation)
@@ -98,24 +128,25 @@ def CNN_dense(input_size,label_num,padding = 'same',activation = 'relu'):
 
     dense_1 = tf.keras.layers.Dense(50,activation = activation,kernel_initializer='glorot_normal')(flat)
     dense_2 = tf.keras.layers.Dense(50,activation = activation,kernel_initializer='glorot_normal')(dense_1)
-    outputs = tf.keras.layers.Dense(label_num,activation =activation,kernel_initializer='glorot_normal')(dense_2)
+    outputs = tf.keras.layers.Dense(1,activation ='sigmoid',kernel_initializer='glorot_normal')(dense_2)
 
-
+    auroc = tf.keras.metrics.AUC(curve='ROC', name='auroc')
+    aupr = tf.keras.metrics.AUC(curve='PR', name='aupr')
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-    loss = tf.keras.losses.MeanSquaredError()
+    loss = tf.keras.losses.BinaryCrossentropy()
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
     model.compile(inputs = inputs,outputs = outputs,
                     optimizer=optimizer,
                     loss=loss,
-                    metrics=['mae'])
+                     metrics = ['accuracy',auroc,aupr])
 
     return model
 
 def CNN_LSTM(input_size,label_num,padding = 'same',activation = 'relu'):
     
-    inputs = tf.keras.layers.Input(input_shape = input_size)
+    inputs = tf.keras.layers.Input(shape = input_size)
     
     conv_1 = conv_layer(inputs,32,5,1,activation = activation)
     conv_2 = conv_layer(conv_1,32,5,1,activation = activation)
@@ -131,47 +162,52 @@ def CNN_LSTM(input_size,label_num,padding = 'same',activation = 'relu'):
 
     dense_1 = tf.keras.layers.Dense(50,activation = activation,kernel_initializer='glorot_normal')(lstm)
     dense_2 = tf.keras.layers.Dense(50,activation = activation,kernel_initializer='glorot_normal')(dense_1)
-    outputs = tf.keras.layers.Dense(label_num,activation =activation,kernel_initializer='glorot_normal')(dense_2)
+    outputs = tf.keras.layers.Dense(1,activation ='sigmoid',kernel_initializer='glorot_normal')(dense_2)
 
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-    loss = tf.keras.losses.MeanSquaredError()
+    loss = tf.keras.losses.BinaryCrossentropy()
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
     model.compile(inputs = inputs,outputs = outputs,
                     optimizer=optimizer,
                     loss=loss,
-                    metrics=['mae'])
+                     metrics = ['accuracy',auroc,aupr])
     
-def Residual_dense(input_size,label_num,padding = 'same',activation = 'relu'):
+    return model
     
-    inputs = tf.keras.layers.Input(input_shape = input_size)
+def Residual_dense(input_shape,label_num,padding = 'same',activation = 'relu'):
+    
+    inputs = tf.keras.layers.Input(shape = input_shape)
     
     conv_1 = tf.keras.layers.Conv1D(32,11,1,kernel_initializer = 'glorot_normal',
                                       padding=padding)(inputs)
     rb_1 = residual_block(conv_1,32,11,1)
     rb_2 = residual_block(rb_1,32,11,2)
-    bn = tf.keras.layers.BatchNormalization()(rb_2)
+    rb_3 = residual_block(rb_1,32,11,4)
+    bn = tf.keras.layers.BatchNormalization()(rb_3)
     ac = tf.keras.layers.Activation(activation)(bn)
     
-    conv_2 = conv_layer(ac,5,1,1)(ac)
+    conv_2 = conv_layer(ac,5,1,1)
     
     flat = tf.keras.layers.Flatten()(conv_2)
 
     dense_1 = tf.keras.layers.Dense(50,activation = activation,kernel_initializer='glorot_normal')(flat)
     dense_2 = tf.keras.layers.Dense(50,activation = activation,kernel_initializer='glorot_normal')(dense_1)
-    outputs = tf.keras.layers.Dense(label_num,activation =activation,kernel_initializer='glorot_normal')(dense_2)
+    outputs = tf.keras.layers.Dense(1,activation ='sigmoid',kernel_initializer='glorot_normal')(dense_2)
 
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-    loss = tf.keras.losses.MeanSquaredError()
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
+    loss = tf.keras.losses.BinaryCrossentropy()
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
     model.compile(inputs = inputs,outputs = outputs,
                     optimizer=optimizer,
                     loss=loss,
-                    metrics=['mae'])
+                     metrics = ['accuracy',auroc,aupr])
+    
+    return model
     
 #def Residual_LSTM():
